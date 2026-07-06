@@ -1,0 +1,17 @@
+# VS Code (mantener settings del proyecto si querés, ignorar lo local)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Credenciales / secretos - NO subir a GitHub
+*.key
+*.pem
+credentials.json
+client_secret*.json
+service-account*.json
+.env
+
+# Sistema
+Thumbs.db
+Desktop.ini
+.DS_Store
