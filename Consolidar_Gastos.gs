@@ -27,6 +27,12 @@ const CONFIG = {
   // Columnas: A=CATEGORIES GRAL, B=CATEGORIES, C=ESPECIFIC CATEGORIES, D=COLUMNA E (clave)
   MAPPING_SHEET_ID: '1tA27_IqQt6J4PyIEWOQSlB5Lp_dsraHx1yWiHDX6ias',
 
+  // Planilla MAESTRA donde se escribe la pestaña GASTOS (la que lee el dashboard).
+  // Pegá acá el ID de esa planilla (está en su URL:
+  //   https://docs.google.com/spreadsheets/d/<ESTE_ID>/edit ).
+  // Si se deja vacío, se usa la planilla activa (solo funciona al correr desde el menú).
+  MASTER_SHEET_ID: '1ad1aOTha1abiYbOiSXsoCh-9Q4b0jLuSDaE5vPJIkGY',
+
   // Prefijos para encontrar carpetas y planillas
   SUBFOLDER_PREFIX: 'Expenses',
   SPREADSHEET_PREFIX: 'Gastos Generales Remotely',
@@ -279,7 +285,7 @@ function mapearCategoria_(especifica, categoriaOrig, mapeo) {
 
 // =========================== ESCRITURA DEL DESTINO ===========================
 function escribirGastos_(filas) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getMasterSpreadsheet_();
   let hoja = ss.getSheetByName(CONFIG.GASTOS_TAB_NAME);
   if (!hoja) hoja = ss.insertSheet(CONFIG.GASTOS_TAB_NAME);
 
@@ -375,6 +381,20 @@ function eliminarTriggers() {
 }
 
 // =============================== UTILIDADES ===============================
+/**
+ * Devuelve la planilla maestra donde se escribe GASTOS.
+ * Prioriza CONFIG.MASTER_SHEET_ID (funciona desde el editor y desde triggers);
+ * si está vacío, cae en la planilla activa (solo funciona desde el menú de la planilla).
+ */
+function getMasterSpreadsheet_() {
+  if (CONFIG.MASTER_SHEET_ID) return SpreadsheetApp.openById(CONFIG.MASTER_SHEET_ID);
+  const activa = SpreadsheetApp.getActiveSpreadsheet();
+  if (activa) return activa;
+  throw new Error(
+    'No hay planilla activa. Configurá CONFIG.MASTER_SHEET_ID con el ID de la ' +
+    'planilla maestra, o ejecutá desde el menú "⚙️ Gastos" dentro de esa planilla.');
+}
+
 function indexarHeaders_(headers, esperadas) {
   const idx = {};
   esperadas.forEach(function(nombre) {
