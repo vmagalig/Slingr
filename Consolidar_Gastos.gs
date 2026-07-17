@@ -45,6 +45,23 @@ const CONFIG = {
   KEEP_ORIGINAL_IF_UNMAPPED: true,
 };
 
+/**
+ * Alias de encabezados: nombre canónico (el que usa el script) → nombres
+ * alternativos que pueden aparecer en planillas de otros años.
+ *
+ * Motivo: la planilla 2021 usa "COT" (sin punto) en vez de "COT.", entre otras
+ * variaciones históricas. Sin esto, esas columnas no matchean y los importes
+ * quedan en 0. La coincidencia exacta con el nombre canónico siempre tiene
+ * prioridad; los alias solo se usan como respaldo.
+ */
+const COL_ALIASES = {
+  'COT.':     ['COT', 'COTIZACION', 'COTIZACIÓN'],
+  '1COT.':    ['1COT', 'COT OFICIAL', 'COTIZACION OFICIAL', 'COTIZACIÓN OFICIAL'],
+  'MONTOUSD': ['MONTO USD', 'EQUIVALENCIA USD', 'MONTO U$D', 'MONTOU$D'],
+  'MONTO$':   ['MONTO $', 'EQUIVALENCIA $', 'MONTO AR$', 'MONTOAR$'],
+  'FACT N°':  ['FACT N', 'FACT NRO', 'INVOICE (Y/N)', 'INVOICE'],
+};
+
 // Columnas esperadas en la pestaña "expenses" de cada planilla fuente
 const EXP_COLS = [
   'MONTH', 'DATE', 'CANT.', 'CATEGORIES', 'ESPECIFIC CATEGORIES', 'EXPENSES',
@@ -397,10 +414,20 @@ function getMasterSpreadsheet_() {
 
 function indexarHeaders_(headers, esperadas) {
   const idx = {};
+  const norm = function(h) { return String(h).trim().toUpperCase(); };
+  const headersN = headers.map(norm);
+
   esperadas.forEach(function(nombre) {
-    idx[nombre] = headers.findIndex(function(h) {
-      return h.toUpperCase() === nombre.toUpperCase();
-    });
+    // 1) coincidencia exacta con el nombre canónico (tiene prioridad)
+    var i = headersN.indexOf(norm(nombre));
+
+    // 2) respaldo: probar los alias definidos para esa columna
+    if (i === -1 && COL_ALIASES[nombre]) {
+      for (var a = 0; a < COL_ALIASES[nombre].length && i === -1; a++) {
+        i = headersN.indexOf(norm(COL_ALIASES[nombre][a]));
+      }
+    }
+    idx[nombre] = i;
   });
   return idx;
 }
