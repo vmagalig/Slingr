@@ -41,6 +41,16 @@ const CONFIG = {
   // Pestaña destino en la planilla maestra (debe coincidir con sheets.ts del dashboard)
   GASTOS_TAB_NAME: 'GASTOS',
 
+  // Pestaña de la maestra con las cotizaciones OFICIAL y BLUE mensuales.
+  // Columnas: A=ANO, B=MES, C=MES_NOMBRE, D=VENTA_OFICIAL, E=VENTA_BLUE, F=ACTUALIZADO
+  // Se cruza por ANO+MES para completar COT_OFICIAL/BLUE y sus montos USD.
+  DOLAR_TAB_NAME: 'DOLAR',
+
+  // Pestaña de la maestra con la cotización REAL por caja (promedio mensual).
+  // Columnas: A=ANO, B=MES, C=CAJA, D=COT_PROMEDIO, E=COT_MIN, F=COT_MAX, G=CANT_REGISTROS
+  // Se cruza por ANO+MES+CAJA para completar MONTO_USD_REAL.
+  COTIZ_CAJAS_TAB_NAME: 'COTIZACIONES_CAJAS',
+
   // Si un valor no está en el mapeo: true = usar categoría original, false = "sin mapear"
   KEEP_ORIGINAL_IF_UNMAPPED: true,
 };
@@ -97,11 +107,15 @@ const EXP_COLS = [
  *   [20] ESPECIFIC_CAT_MAP   ← del mapeo
  *   [21] ANO
  *   [22] MES
- *   [23] MONTO_USD_REAL
- *   [24] COT_OFICIAL
- *   [25] MONTO_USD_OFICIAL
- *   [26] COT_BLUE
- *   [27] MONTO_USD_BLUE
+ *   [23] MONTO_USD_REAL      ← si el gasto es en pesos: MONTO_ARS / cot. real de la caja
+ *                              (COTIZACIONES_CAJAS por ANO+MES+CAJA). Si es en USD: el importe USD tal cual.
+ *   [24] COT_OFICIAL         ← VENTA_OFICIAL de la solapa "DOLAR" (por ANO+MES)
+ *   [25] MONTO_USD_OFICIAL   ← si es en pesos: MONTO_ARS / COT_OFICIAL. Si es en USD: importe USD.
+ *   [26] COT_BLUE            ← VENTA_BLUE de la solapa "DOLAR" (por ANO+MES)
+ *   [27] MONTO_USD_BLUE      ← si es en pesos: MONTO_ARS / COT_BLUE. Si es en USD: importe USD.
+ *
+ *  Nota: los gastos ya expresados en dólares (CURRENCY = USD/USDT/USDC) no se
+ *  reconvierten; sus tres montos USD son iguales al importe USD de la fuente.
  */
 const OUTPUT_HEADERS = [
   'MONTH', 'DATE', 'CANT.', 'CATEGORIES', 'ESPECIFIC_CAT',
@@ -128,6 +142,8 @@ function onOpen() {
 function actualizarConsolidado() {
   try {
     const mapeo = construirMapeoCategorias_();
+    const mapaDolar = construirMapaDolar_();   // OFICIAL + BLUE por ANO+MES
+    const mapaCajas = construirMapaCajas_();    // cot. REAL por ANO+MES+CAJA
     const carpetaPadre = DriveApp.getFolderById(CONFIG.PARENT_FOLDER_ID);
 
     const filas = [];
@@ -154,7 +170,7 @@ function actualizarConsolidado() {
           continue;
         }
 
-        const filasArchivo = procesarHojaExpenses_(hoja, anio, mapeo);
+        const filasArchivo = procesarHojaExpenses_(hoja, anio, mapeo, mapaDolar, mapaCajas);
         filas.push.apply(filas, filasArchivo);
         archivosProcesados++;
         Logger.log('✔ %s (%s): %s filas', archivo.getName(), anio, filasArchivo.length);
@@ -177,7 +193,7 @@ function actualizarConsolidado() {
 }
 
 // =================== LECTURA Y PROCESAMIENTO DE UNA HOJA ===================
-function procesarHojaExpenses_(hoja, anio, mapeo) {
+function procesarHojaExpenses_(hoja, anio, mapeo, mapaDolar, mapaCajas) {
   const valores = hoja.getDataRange().getValues();
   if (valores.length < 2) return [];
 
@@ -200,9 +216,31 @@ function procesarHojaExpenses_(hoja, anio, mapeo) {
     const montoArs    = parseNum_(getCell_(fila, idx, 'MONTO$'));
     const cotFuente   = parseNum_(getCell_(fila, idx, 'COT.'));
     const montoUsdSrc = parseNum_(getCell_(fila, idx, 'MONTOUSD'));
-    const cotOficial  = parseNum_(getCell_(fila, idx, '1COT.'));
-    const montoUsdOf  = (cotOficial > 0 && montoArs > 0) ? montoArs / cotOficial : montoUsdSrc;
-    const montoUsdReal = montoUsdSrc > 0 ? montoUsdSrc : montoUsdOf;
+    const caja  = str_(getCell_(fila, idx, 'CAJAS'));
+    const esUsd = esMonedaUsd_(getCell_(fila, idx, 'CURRENCY'));
+
+    // Cotizaciones del mes: REAL por caja (COTIZACIONES_CAJAS) y OFICIAL/BLUE (DOLAR).
+    const cotReal    = buscarCajas_(mapaCajas, anio, mes, caja);
+    const dolar      = buscarDolar_(mapaDolar, anio, mes);
+    const cotOficial = dolar.oficial;
+    const cotBlue    = dolar.blue;
+
+    var montoUsdReal, montoUsdOf, montoUsdBlue;
+    if (esUsd) {
+      // Gasto ya en dólares (USD/USDT/USDC): los tres montos son el mismo importe USD.
+      // Se prioriza MONTOUSD de la fuente; si falta, se deriva del monto y la cot. fuente.
+      const usd = montoUsdSrc > 0 ? montoUsdSrc
+                : (cotFuente > 0 ? montoArs / cotFuente : montoArs);
+      montoUsdReal = usd;
+      montoUsdOf   = usd;
+      montoUsdBlue = usd;
+    } else {
+      // Gasto en pesos: reconvertir el monto ARS por cada cotización del mes.
+      montoUsdReal = (cotReal    > 0 && montoArs > 0) ? montoArs / cotReal
+                   : (montoUsdSrc > 0 ? montoUsdSrc : 0);          // fallback si falta la caja
+      montoUsdOf   = (cotOficial > 0 && montoArs > 0) ? montoArs / cotOficial : 0;
+      montoUsdBlue = (cotBlue    > 0 && montoArs > 0) ? montoArs / cotBlue    : 0;
+    }
 
     out.push([
       monthVal || mes,                                              // [0]  MONTH
@@ -231,8 +269,8 @@ function procesarHojaExpenses_(hoja, anio, mapeo) {
       montoUsdReal,                                                 // [23] MONTO_USD_REAL
       cotOficial,                                                   // [24] COT_OFICIAL
       montoUsdOf,                                                   // [25] MONTO_USD_OFICIAL
-      0,                                                            // [26] COT_BLUE (no disponible en fuente)
-      0,                                                            // [27] MONTO_USD_BLUE (no disponible)
+      cotBlue,                                                      // [26] COT_BLUE (solapa "dolar" por ANO+MES)
+      montoUsdBlue,                                                 // [27] MONTO_USD_BLUE
     ]);
   }
   return out;
@@ -298,6 +336,161 @@ function mapearCategoria_(especifica, categoriaOrig, mapeo) {
     categories: fallback,
     especific:  normCat_(especifica) || 'sin categoria',
   };
+}
+
+// ==================== COTIZACIONES OFICIAL/BLUE (solapa "DOLAR") ====================
+/**
+ * Construye el mapa de cotizaciones OFICIAL y BLUE desde la solapa "DOLAR".
+ *
+ * La solapa tiene, por mes:
+ *   A: ANO   B: MES   C: MES_NOMBRE   D: VENTA_OFICIAL   E: VENTA_BLUE   F: ACTUALIZADO
+ *
+ * Mapa: "<ano>-<mes>" → { oficial, blue }. Ej: "2024-7" → {oficial:941.73, blue:1436.77}
+ * Si no existe la solapa, devuelve {} (oficial/blue quedan en 0; no rompe la corrida).
+ */
+function construirMapaDolar_() {
+  const ss = getMasterSpreadsheet_();
+  const hoja = getSheetCI_(ss, CONFIG.DOLAR_TAB_NAME);
+  if (!hoja) {
+    Logger.log('⚠️ No se encontró la solapa "%s" en la maestra. OFICIAL/BLUE quedarán en 0.',
+      CONFIG.DOLAR_TAB_NAME);
+    return {};
+  }
+
+  const valores = hoja.getDataRange().getValues();
+  if (valores.length < 2) return {};
+
+  const headers = valores[0].map(function(h) { return normalizar_(String(h)); });
+  var colAno = headers.findIndex(function(h) { return h === 'ano' || h === 'anio'; });
+  var colMes = headers.indexOf('mes');
+  // Preferir VENTA_OFICIAL / VENTA_BLUE; si no, cualquier "oficial"/"blue".
+  var colOfi = headers.findIndex(function(h) { return h.indexOf('venta') !== -1 && h.indexOf('oficial') !== -1; });
+  if (colOfi === -1) colOfi = headers.findIndex(function(h) { return h.indexOf('oficial') !== -1; });
+  var colBlue = headers.findIndex(function(h) { return h.indexOf('venta') !== -1 && h.indexOf('blue') !== -1; });
+  if (colBlue === -1) colBlue = headers.findIndex(function(h) { return h.indexOf('blue') !== -1; });
+
+  // Fallback por posición: A=ANO, B=MES, D(idx 3)=VENTA_OFICIAL, E(idx 4)=VENTA_BLUE
+  if (colAno  === -1) colAno  = 0;
+  if (colMes  === -1) colMes  = 1;
+  if (colOfi  === -1) colOfi  = 3;
+  if (colBlue === -1) colBlue = 4;
+
+  const mapa = {};
+  for (var r = 1; r < valores.length; r++) {
+    const ano = parseInt(valores[r][colAno], 10);
+    const mes = parseInt(valores[r][colMes], 10);
+    if (!ano || !mes) continue;
+    const key = ano + '-' + mes;
+    if (mapa[key]) continue; // la primera definición de cada mes gana
+    mapa[key] = {
+      oficial: parseNum_(valores[r][colOfi]),
+      blue:    parseNum_(valores[r][colBlue]),
+    };
+  }
+  Logger.log('Mapa DOLAR construido: %s meses.', Object.keys(mapa).length);
+  return mapa;
+}
+
+/**
+ * Busca las cotizaciones oficial y blue para un (año, mes).
+ * Devuelve { oficial:0, blue:0 } si no hay dato.
+ */
+function buscarDolar_(mapaDolar, anio, mes) {
+  const vacio = { oficial: 0, blue: 0 };
+  if (!mapaDolar) return vacio;
+  const ano = parseInt(anio, 10);
+  const m   = parseInt(mes, 10);
+  if (!ano || !m) return vacio;
+  return mapaDolar[ano + '-' + m] || vacio;
+}
+
+// ================ COTIZACIÓN REAL POR CAJA (solapa "COTIZACIONES_CAJAS") ================
+/**
+ * Cajas que NO tienen cotización propia y usan la de otra caja.
+ * Solo actúa como respaldo: si la caja tiene cotización propia para ese año/mes,
+ * esa tiene prioridad. Los nombres van normalizados (minúscula, sin tildes/puntos).
+ *
+ * "mercado pago" usa la cotización del banco del mes. Galicia y Supervielle no
+ * coexisten (Galicia hasta 2024-11, Supervielle desde 2025-01), así que se prueba
+ * Galicia y luego Supervielle: para cada mes solo una devuelve valor.
+ */
+const CAJA_ALIASES = {
+  'mercado pago': ['galicia', 'supervielle'],
+};
+
+/**
+ * Construye el mapa de cotización real por caja desde "COTIZACIONES_CAJAS".
+ *
+ * La solapa tiene, por año/mes/caja:
+ *   A: ANO   B: MES   C: CAJA   D: COT_PROMEDIO   E: COT_MIN   F: COT_MAX   G: CANT_REGISTROS
+ *
+ * Mapa: "<ano>-<mes>-<caja normalizada>" → COT_PROMEDIO (número).
+ * Si no existe la solapa, devuelve {} (MONTO_USD_REAL cae al monto USD de la fuente).
+ */
+function construirMapaCajas_() {
+  const ss = getMasterSpreadsheet_();
+  const hoja = getSheetCI_(ss, CONFIG.COTIZ_CAJAS_TAB_NAME);
+  if (!hoja) {
+    Logger.log('⚠️ No se encontró la solapa "%s" en la maestra. MONTO_USD_REAL usará el monto de la fuente.',
+      CONFIG.COTIZ_CAJAS_TAB_NAME);
+    return {};
+  }
+
+  const valores = hoja.getDataRange().getValues();
+  if (valores.length < 2) return {};
+
+  const headers = valores[0].map(function(h) { return normalizar_(String(h)); });
+  var colAno  = headers.findIndex(function(h) { return h === 'ano' || h === 'anio'; });
+  var colMes  = headers.indexOf('mes');
+  var colCaja = headers.indexOf('caja');
+  var colProm = headers.findIndex(function(h) { return h.indexOf('promedio') !== -1; });
+
+  // Fallback por posición: A=ANO, B=MES, C=CAJA, D(idx 3)=COT_PROMEDIO
+  if (colAno  === -1) colAno  = 0;
+  if (colMes  === -1) colMes  = 1;
+  if (colCaja === -1) colCaja = 2;
+  if (colProm === -1) colProm = 3;
+
+  const mapa = {};
+  for (var r = 1; r < valores.length; r++) {
+    const ano  = parseInt(valores[r][colAno], 10);
+    const mes  = parseInt(valores[r][colMes], 10);
+    const caja = normalizar_(valores[r][colCaja]);
+    if (!ano || !mes || !caja) continue;
+    const prom = parseNum_(valores[r][colProm]);
+    if (prom <= 0) continue;
+    const key = ano + '-' + mes + '-' + caja;
+    if (mapa[key]) continue; // la primera definición gana
+    mapa[key] = prom;
+  }
+  Logger.log('Mapa COTIZACIONES_CAJAS construido: %s combinaciones.', Object.keys(mapa).length);
+  return mapa;
+}
+
+/**
+ * Busca la cotización real (COT_PROMEDIO) para un (año, mes, caja).
+ * Prioriza la cotización propia de la caja; si no existe, prueba los alias
+ * definidos en CAJA_ALIASES (ej. "mercado pago" → banco del mes). Devuelve 0
+ * si no hay dato ni propio ni por alias.
+ */
+function buscarCajas_(mapaCajas, anio, mes, caja) {
+  if (!mapaCajas) return 0;
+  const ano = parseInt(anio, 10);
+  const m   = parseInt(mes, 10);
+  const c   = normalizar_(caja);
+  if (!ano || !m || !c) return 0;
+
+  const propia = mapaCajas[ano + '-' + m + '-' + c];
+  if (propia) return propia;
+
+  const alias = CAJA_ALIASES[c];
+  if (alias) {
+    for (var i = 0; i < alias.length; i++) {
+      const v = mapaCajas[ano + '-' + m + '-' + alias[i]];
+      if (v) return v;
+    }
+  }
+  return 0;
 }
 
 // =========================== ESCRITURA DEL DESTINO ===========================
@@ -523,6 +716,15 @@ function parseNum_(v) {
   }
   const n = parseFloat(s);
   return isNaN(n) ? 0 : n;
+}
+
+/**
+ * True si la moneda del gasto es dólar (USD, USDT, USDC, U$D, U$S...).
+ * Los pesos ($, ARS, AR$, PESOS) y valores vacíos devuelven false.
+ */
+function esMonedaUsd_(v) {
+  const s = normalizar_(v);
+  return s.indexOf('usd') !== -1 || s.indexOf('u$') !== -1;
 }
 
 function esContextoUI_() {
