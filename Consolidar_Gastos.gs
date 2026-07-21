@@ -108,7 +108,9 @@ const EXP_COLS = [
  *   [21] ANO
  *   [22] MES
  *   [23] MONTO_USD_REAL      ← si el gasto es en pesos: MONTO_ARS / cot. real de la caja
- *                              (COTIZACIONES_CAJAS por ANO+MES+CAJA). Si es en USD: el importe USD tal cual.
+ *                              (COTIZACIONES_CAJAS por ANO+MES+CAJA). Si esa cot. es 1
+ *                              (sin conversión), se usa la del banco del mes (Galicia/Supervielle).
+ *                              Si el gasto ya es en USD: el importe USD tal cual.
  *   [24] COT_OFICIAL         ← VENTA_OFICIAL de la solapa "DOLAR" (por ANO+MES)
  *   [25] MONTO_USD_OFICIAL   ← si es en pesos: MONTO_ARS / COT_OFICIAL. Si es en USD: importe USD.
  *   [26] COT_BLUE            ← VENTA_BLUE de la solapa "DOLAR" (por ANO+MES)
@@ -406,16 +408,22 @@ function buscarDolar_(mapaDolar, anio, mes) {
 
 // ================ COTIZACIÓN REAL POR CAJA (solapa "COTIZACIONES_CAJAS") ================
 /**
+ * Cajas que usan como banco de referencia (para el fallback de cotización).
+ * Galicia y Supervielle no coexisten (Galicia hasta 2024-11, Supervielle desde
+ * 2025-01), así que se prueban en orden y para cada mes solo una devuelve valor.
+ * Nombres normalizados (minúscula, sin tildes/puntos).
+ */
+const BANCOS_COTIZACION = ['galicia', 'supervielle'];
+
+/**
  * Cajas que NO tienen cotización propia y usan la de otra caja.
- * Solo actúa como respaldo: si la caja tiene cotización propia para ese año/mes,
- * esa tiene prioridad. Los nombres van normalizados (minúscula, sin tildes/puntos).
+ * Solo actúa como respaldo: si la caja tiene cotización propia (> 1) para ese
+ * año/mes, esa tiene prioridad.
  *
- * "mercado pago" usa la cotización del banco del mes. Galicia y Supervielle no
- * coexisten (Galicia hasta 2024-11, Supervielle desde 2025-01), así que se prueba
- * Galicia y luego Supervielle: para cada mes solo una devuelve valor.
+ * "mercado pago" usa la cotización del banco del mes.
  */
 const CAJA_ALIASES = {
-  'mercado pago': ['galicia', 'supervielle'],
+  'mercado pago': BANCOS_COTIZACION,
 };
 
 /**
@@ -469,9 +477,16 @@ function construirMapaCajas_() {
 
 /**
  * Busca la cotización real (COT_PROMEDIO) para un (año, mes, caja).
- * Prioriza la cotización propia de la caja; si no existe, prueba los alias
- * definidos en CAJA_ALIASES (ej. "mercado pago" → banco del mes). Devuelve 0
- * si no hay dato ni propio ni por alias.
+ *
+ * Solo se aceptan cotizaciones > 1: un valor de 1 significa "sin conversión"
+ * (transacciones ya en USD) y no sirve para pasar pesos a dólares. En ese caso
+ * —o si la caja no tiene cotización propia— se usa la cotización del banco del
+ * mes (Galicia o Supervielle). Devuelve 0 si no hay ninguna cotización válida.
+ *
+ * Orden de resolución:
+ *   1) cotización propia de la caja (si es > 1)
+ *   2) alias definidos en CAJA_ALIASES (ej. "mercado pago"), tomando valores > 1
+ *   3) banco del mes (Galicia/Supervielle)
  */
 function buscarCajas_(mapaCajas, anio, mes, caja) {
   if (!mapaCajas) return 0;
@@ -481,14 +496,31 @@ function buscarCajas_(mapaCajas, anio, mes, caja) {
   if (!ano || !m || !c) return 0;
 
   const propia = mapaCajas[ano + '-' + m + '-' + c];
-  if (propia) return propia;
+  if (propia > 1) return propia;
 
   const alias = CAJA_ALIASES[c];
   if (alias) {
     for (var i = 0; i < alias.length; i++) {
       const v = mapaCajas[ano + '-' + m + '-' + alias[i]];
-      if (v) return v;
+      if (v > 1) return v;
     }
+  }
+
+  return buscarBanco_(mapaCajas, ano, m);
+}
+
+/**
+ * Cotización del banco para un (año, mes): Galicia o Supervielle (no coexisten).
+ * Devuelve la primera cotización > 1 que encuentre, o 0 si no hay banco ese mes.
+ */
+function buscarBanco_(mapaCajas, anio, mes) {
+  if (!mapaCajas) return 0;
+  const ano = parseInt(anio, 10);
+  const m   = parseInt(mes, 10);
+  if (!ano || !m) return 0;
+  for (var i = 0; i < BANCOS_COTIZACION.length; i++) {
+    const v = mapaCajas[ano + '-' + m + '-' + BANCOS_COTIZACION[i]];
+    if (v > 1) return v;
   }
   return 0;
 }
